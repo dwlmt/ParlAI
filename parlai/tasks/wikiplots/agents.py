@@ -1,47 +1,80 @@
-import os
-
 import more_itertools
 from datasets import load_dataset
 
 from parlai.core.teachers import DialogTeacher
 
-_HUGGINGFACE_SCRIPT = os.getenv('WRITING_PROMPTS_DATASET_SCRIPT',
-                                "https://raw.githubusercontent.com/dwlmt/story-datasets/main/WritingPrompts/hugging_face_dataset.py")
 
-
-class WritingPromptsDialogTeacher(DialogTeacher):
+class WikiPlotsDialogTeacher(DialogTeacher):
     @staticmethod
     def add_cmdline_args(parser):
-        parser = parser.add_argument_group('WritingPrompts Teacher Args')
+        parser = parser.add_argument_group('WikiPlots Teacher Args')
         parser.add_argument(
-            '--writing-prompts-config-name',
+            '--wikiplots-config-name',
             type=str,
-            default="writing_prompts_sentence",
-            help="The WritingPrompts huggingface configs name to load.",
+            default="wikiplots_sentence",
+            help="The Wikiplots huggingface configs name to load.",
+
+        )
+        parser.add_argument(
+            '--wikiplots-train-split',
+            type=int,
+            default=80,
+            help="The training split for Wikiplots.",
+        )
+        parser.add_argument(
+            '--wikiplots-valid-split',
+            type=int,
+            default=10,
+            help="The validation split for Wikiplots.",
+        )
+        parser.add_argument(
+            '--wikiplots-test-split',
+            type=int,
+            default=10,
+            help="The test split for Wikiplots.",
+        )
+        parser.add_argument(
+            '--wikiplots-dataset-script-path',
+            type=str,
+            help="The Huggingface datasets path.",
         )
 
     def __init__(self, opt, shared=None):
         self.datatype = opt['datatype']
 
         if opt['datatype'].startswith('train'):
-            suffix = 'train'
+            split = 'train'
         elif opt['datatype'].startswith('valid'):
-            suffix = 'validation'
+            split = 'validation'
         else:
-            suffix = 'test'
+            split = 'test'
 
-        self.id = 'writing_prompts'
-        self.split = suffix
-        self.config_name = opt["writing_prompts_config_name"]
+        self.id = 'wikiplots'
+        self.split = split
+        self.config_name = opt["wikiplots_config_name"]
 
-        opt['datafile'] = os.path.join(os.path.dirname(os.path.realpath(__file__)), _HUGGINGFACE_SCRIPT)
+        self.train_split = opt["wikiplots_train_split"]
+        self.valid_split = opt["wikiplots_valid_split"]
+        self.test_split = opt["wikiplots_test_split"]
+
+        self.dataset_script = opt["wikiplots_dataset_script_path"]
+
+        opt['datafile'] = ""
 
         super().__init__(opt, shared)
 
     def setup_data(self, path):
         print('loading: ' + path)
 
-        dataset = load_dataset(path, name=self.config_name, split=self.split)
+        if self.split == "train":
+            dataset = load_dataset(self.dataset_script, name=self.config_name, split=f'train[:{self.train_split}%]')
+        elif self.split == "validation":
+            dataset = load_dataset(self.dataset_script, name=self.config_name,
+                                   split=f'train[{self.train_split}%:{self.train_split + self.valid_split}%]')
+        else:
+            dataset = load_dataset(self.dataset_script, name=self.config_name,
+                                   split=f'train[-{self.test_split}%:]')
+
         for story in dataset:
 
             passage_pairs = more_itertools.chunked(story["passages"], n=2)
@@ -52,10 +85,5 @@ class WritingPromptsDialogTeacher(DialogTeacher):
                 yield {"text": passage_pair[0]["text"], "labels": passage_pair[1]["text"]}, end_of_episode
 
 
-class ExtrasTeacher(WritingPromptsDialogTeacher):
-    def __init__(self, opt, shared=None):
-        super().__init__(opt, shared, extras=True)
-
-
-class DefaultTeacher(WritingPromptsDialogTeacher):
+class DefaultTeacher(WikiPlotsDialogTeacher):
     pass
