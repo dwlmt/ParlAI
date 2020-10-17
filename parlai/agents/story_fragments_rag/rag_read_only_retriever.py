@@ -17,15 +17,66 @@ class RagReadOnlyRetrieverAgent(Agent):
 
     @staticmethod
     def add_cmdline_args(parser):
-        parser = parser.add_argument_group('RAG Lookup Retriever Arguments')
+
+        def add_bool_arg(parser, name, default=False):
+            name_underscore = name.replace("-", "_")
+            parser.add_argument(f'--{name}', dest=name_underscore, action='store_true')
+            parser.add_argument(f'--no-{name}', dest=name_underscore, action='store_false')
+            parser.set_defaults(**{name_underscore: default})
+
+        parser = parser.add_argument_group('RAG Arguments')
 
         parser.add_argument(
-            '--rag-context-length',
+            '--rag-pretrained-model',
+            default="facebook/rag-token-nq",
+            type=str,
+            help='The pretrained model to use.',
+        )
+
+        add_bool_arg(parser, 'rag-use-dummy-dataset', default=True)
+        add_bool_arg(parser, 'rag-output-retrieved', default=True)
+
+        parser.add_argument(
+            '--rag-n-docs',
+            default=5,
+            type=int,
+            help='Number of documents to retrieve.',
+        )
+        parser.add_argument(
+            '--rag-max-combined-length',
+            default=300,
+            type=int,
+            help='Max length of contextualized input returned by the retriever.',
+        )
+        parser.add_argument(
+            '--rag-retrieval-vector-size',
+            default=768,
+            type=int,
+            help='Size of the encoded knowledgebase vectors. ',
+        )
+        parser.add_argument(
+            '--rag-dataset',
+            default="wiki_dpr",
+            type=str,
+            help='A dataset identifier for Huggingface datasets to use as the knowledgebase, default "wiki_dpr"',
+        )
+        parser.add_argument(
+            '--rag-index-name',
+            default="exact",
+            type=str,
+            help='The index name for Faiss, "compressed" is a bucketed index, "exact" is an exact match index.',
+        )
+        parser.add_argument(
+            '--rag-index-path',
+            required=False,
+            type=str,
+            help='Optional path to the Faiss index to load from disk.',
+        )
+        parser.add_argument(
+            '--context-length',
             default=-1,
             type=int,
-            help='Number of past utterances to remember when '
-                 'building flattened batches of data in multi-'
-                 'example episodes.',
+            help='Number of context states to retain.',
         )
 
     def __init__(self, opt, shared=None):
@@ -35,28 +86,46 @@ class RagReadOnlyRetrieverAgent(Agent):
         self.use_cuda = torch.cuda.is_available()
 
         if shared is None:
-            self.tokenizer = RagTokenizer.from_pretrained("facebook/rag-token-base")
-            self.retriever = RagRetriever.from_pretrained("facebook/rag-token-base",
-                                                          index_name="exact", use_dummy_dataset=True)
 
-            self.decoder = RagSequenceForGeneration.from_pretrained("facebook/rag-token-nq", retriever=self.retriever)
+            pretrained_model_name = opt['rag_pretrained_model']
+
+            self.config_override = {}
+            self.config_override['use_dummy_dataset'] = opt['rag_use_dummy_dataset']
+            self.config_override['n_docs'] = opt['rag_n_docs']
+            self.config_override['max_combined_length'] = opt['rag_max_combined_length']
+            self.config_override['dataset'] = opt['rag_dataset']
+            self.config_override['index_name'] = opt['rag_index_name']
+            self.config_override['retrieval_vector_size'] = opt['rag_retrieval_vector_size']
+            self.config_override['output_retrieved'] = opt['rag_output_retrieved']
+
+            if 'rag_index_path' in opt and opt['rag_index_path'] is not None:
+                self.config_override['index_path'] = opt['rag_index_path']
+
+            self.tokenizer = RagTokenizer.from_pretrained(pretrained_model_name)
+            self.retriever = RagRetriever.from_pretrained(pretrained_model_name,
+                                                          **self.config_override)
+
+            self.model = RagSequenceForGeneration.from_pretrained(pretrained_model_name, retriever=self.retriever,
+                                                                  **self.config_override)
 
             if self.use_cuda:
-                self.decoder = self.decoder.cuda()
+                self.model = self.model.cuda()
         else:
             self.tokenizer = shared['tokenizer']
             self.retriever = shared['retriever']
-            self.decoder = shared['decoder']
+            self.model = shared['model']
+            self.config_override = shared['config_override']
 
-        self.context_length = opt["rag_context_length"]
+        self.context_length = opt['context_length']
 
         self.reset()
 
     def share(self):
         shared = super().share()
         shared['tokenizer'] = self.tokenizer
-        shared['decoder'] = self.decoder
+        shared['model'] = self.model
         shared['retriever'] = self.retriever
+        shared['config_override'] = self.config_override
         return shared
 
     def reset(self):
@@ -97,12 +166,17 @@ class RagReadOnlyRetrieverAgent(Agent):
                     input_ids = input_ids.cuda()
 
                 # retrieve support docs
-                retrieved_outputs = self.decoder(input_ids, labels=None, output_retrieved=True)
+                retrieved_outputs = self.model(input_ids, labels=None, output_retrieved=True)
 
+                # Get the document output.
                 dl_scores = retrieved_outputs.doc_scores[0].tolist()
-                dp_scores = retrieved_outputs.doc_scores.softmax(dim=-1)[0].tolist()
+                dp_scores = retrieved_outputs.doc_scores.softmax(dim=-1)[0]
                 doc_ids = retrieved_outputs.retrieved_doc_ids
                 doc_dicts = self.retriever.index.get_doc_dicts(retrieved_outputs.retrieved_doc_ids)[0]
+
+                # Use as a generator to produce the base text.
+                generated = self.model.generate(input_ids=input_ids)
+                generated_text = self.tokenizer.batch_decode(generated, skip_special_tokens=True)[0]
 
                 if len(doc_dicts) > 0:
                     doc_texts = [f"{ti} - {te}" for ti, te in zip(doc_dicts["title"], doc_dicts["text"])]
@@ -111,6 +185,6 @@ class RagReadOnlyRetrieverAgent(Agent):
                     reply['candidate_ids'] = doc_ids.tolist()
 
                     reply['text_candidates'] = doc_texts
-                    reply['text'] = doc_texts[0]
+                    reply['text'] = " \n ".join([generated_text] + doc_texts)
 
         return reply
