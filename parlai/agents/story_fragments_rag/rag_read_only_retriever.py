@@ -73,10 +73,10 @@ class RagReadOnlyRetrieverAgent(Agent):
             help='Optional path to the Faiss index to load from disk.',
         )
         parser.add_argument(
-            '--context-length',
-            default=-1,
+            '--history-size',
+            default=1,
             type=int,
-            help='Number of context states to retain.',
+            help='Number of context history states to retain.',
         )
 
     def __init__(self, opt, shared=None):
@@ -116,7 +116,7 @@ class RagReadOnlyRetrieverAgent(Agent):
             self.model = shared['model']
             self.config_override = shared['config_override']
 
-        self.context_length = opt['context_length']
+        self.history_size = opt['history_size']
 
         self.reset()
 
@@ -132,19 +132,18 @@ class RagReadOnlyRetrieverAgent(Agent):
         super().reset()
         self.episode_done = False
         self.current = []
-        if self.context_length > 0:
-            self.context = deque(maxlen=self.context_length)
+        self.history = deque(maxlen=self.history_size)
 
     def train_act(self):
 
         obs = self.observation
-        self.current.append(obs)
+        self.history.append(obs)
         self.episode_done = obs.get('episode_done', False)
 
         if self.episode_done:
             self.episode_done = False
             self.current.clear()
-            self.context.clear()
+            self.history.clear()
 
         return {'id': self.getID(), 'text': obs.get('labels', ['I don\'t know'])[0]}
 
